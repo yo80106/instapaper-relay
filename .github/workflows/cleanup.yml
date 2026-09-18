@@ -1,0 +1,42 @@
+name: cleanup-old-notes
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Delete markdown files older than 24h
+        run: |
+          now=$(date +%s)
+          cutoff=$((now - 86400))
+          deleted=0
+          for f in $(git ls-files '*.md'); do
+            if [ "$f" = "README.md" ]; then
+              continue
+            fi
+            commit_time=$(git log -1 --format=%ct -- "$f")
+            if [ -n "$commit_time" ] && [ "$commit_time" -lt "$cutoff" ]; then
+              echo "removing $f (last commit $commit_time)"
+              git rm -q "$f"
+              deleted=1
+            fi
+          done
+          if [ "$deleted" -eq 1 ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "chore: auto-remove notes older than 24h"
+            git push
+          else
+            echo "nothing to clean up"
+          fi
