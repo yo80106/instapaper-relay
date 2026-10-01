@@ -1,0 +1,67 @@
+name: cleanup-old-notes
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Delete markdown files older than 1h and purge history
+        run: |
+          now=$(date +%s)
+          cutoff=$((now - 3600))
+          expired=0
+          keep_files=()
+          keep_times=()
+          # -z + mapfile -d '' : 中文 / 含空白的檔名才不會被 git 加引號跳脫或被 word splitting 切開
+          mapfile -d '' -t notes < <(git ls-files -z '*.md')
+          for f in "${notes[@]}"; do
+            if [ "$f" = "README.md" ]; then
+              continue
+            fi
+            commit_time=$(git log -1 --format=%ct -- "$f")
+            if [ -n "$commit_time" ] && [ "$commit_time" -lt "$cutoff" ]; then
+              expired=$((expired + 1))
+            else
+              keep_files+=("$f")
+              keep_times+=("$commit_time")
+            fi
+          done
+
+          if [ "$expired" -eq 0 ]; then
+            echo "nothing to clean up"
+            exit 0
+          fi
+
+          # 不印檔名：公開 repo 的 Actions log 也是公開的，標題不該留在這裡
+          echo "removing $expired expired note(s), rebuilding history"
+
+          # 重建歷史：只留 README + workflow 的 base commit，存活的筆記逐一重新 commit
+          # 並沿用原本的 commit 時間（否則下次檢查年齡會被重置）、訊息不帶標題
+          old_head=$(git rev-parse HEAD)
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -q --orphan rebuilt
+          for f in "${notes[@]}"; do
+            if [ "$f" != "README.md" ]; then
+              git rm -q --cached -- "$f"
+            fi
+          done
+          git commit -q -m "init: relay repo + hourly cleanup action"
+          for i in "${!keep_files[@]}"; do
+            t="${keep_times[$i]:-$now}"
+            git add -- "${keep_files[$i]}"
+            GIT_AUTHOR_DATE="$t +0000" GIT_COMMITTER_DATE="$t +0000" git commit -q -m "relay note"
+          done
+          # lease：若清理期間剛好有人上傳（origin 已前進），寧可這輪失敗、下小時再試，也不要蓋掉新上傳
+          git push -q --force-with-lease="master:$old_head" origin HEAD:master
